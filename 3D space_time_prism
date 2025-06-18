@@ -67,20 +67,6 @@ def create_interpolation_function(points_dict):
         return griddata(points_2d, values, (x, y), method='nearest')
     return interpolate
 
-def reverse_time(points_dict, Tmax):
-    """反转 z 值使其从 Tmax 向下"""
-    dest_points = {}
-    for fid in points_dict:
-        dest_points[fid] = []
-        for p in points_dict[fid]:
-            dest_points[fid].append({
-                "group_no": p["group_no"],
-                "x": p["x"],
-                "y": p["y"],
-                "z": Tmax - p["z"]  # 反转时间轴
-            })
-    return dest_points
-
 def resample_points(points, num_points):
     """重采样点集，确保每层点数一致"""
     if len(points) <= num_points:
@@ -213,45 +199,6 @@ def generate_time_slices(origin_data, dest_data, Tmax, dz):
 
     return valid_points_dict, origin_points_dict, dest_points_dict
 
-def visualize_time_slices_points(time_slices,Tmax):
-    """可视化时间切片的点集"""
-    fig = plt.figure(figsize=(10, 8))
-    ax = fig.add_subplot(111, projection='3d')
-
-    # 为每个时间切片使用不同的颜色
-    colors = plt.cm.viridis(np.linspace(0, 1, len(time_slices)))
-
-    for i, slice_points in enumerate(time_slices):
-        ax.scatter(slice_points[:, 0], slice_points[:, 1], slice_points[:, 2],
-                  c=[colors[i]], label='时间切片')
-
-    ax.set_xlabel('X')
-    ax.set_ylabel('Y')
-    ax.set_zlabel('时间')
-    ax.set_title('时间切片点集')
-
-    # 设置z轴范围
-    ax.set_zlim(0, Tmax)
-    plt.show()
-
-def prepare_dual_prism_points(origin_data, dest_data, Tmax):
-    """
-    分别构造起点体（z=tO）和终点体（z=Tmax - tD）的点集合，用于可视化双锥体结构。
-    """
-    origin_points = []
-    dest_points = []
-
-    for fid in origin_data:
-        for p in origin_data[fid]:
-            origin_points.append([p["x"], p["y"], p["z"]])  # z = tO
-
-    for fid in dest_data:
-        for p in dest_data[fid]:
-            z_reversed = Tmax - p["z"]  # z = Tmax - tD
-            dest_points.append([p["x"], p["y"], z_reversed])
-
-    return np.array(origin_points), np.array(dest_points)
-
 def visualize_all_points(origin_data, dest_data, Tmax):
     """可视化原始点集"""
     origin_points = []
@@ -296,7 +243,7 @@ def visualize_all_points(origin_data, dest_data, Tmax):
     # 显示图形
     plt.show()
 
-def visualize_valid_points(points_dict, Tmax, title="合法点集"):
+def visualize_valid_points(points_dict, Tmax, trip_time_db, title="合法点集"):
     """使用 matplotlib 可视化满足约束的点集"""
     # 将字典中的点转换为数组
     points = np.array([[p["x"], p["y"], p["z"]] for points in points_dict.values() for p in points])
@@ -320,7 +267,7 @@ def visualize_valid_points(points_dict, Tmax, title="合法点集"):
     ax.set_title(title)
 
     # 设置z轴范围
-    ax.set_zlim(0, Tmax)
+    ax.set_zlim(0, trip_time_db)
 
     # 自定义刻度格式化
     ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:.3f}"))
@@ -526,219 +473,6 @@ def visualize_dual_convex_hull(origin_data, dest_data, valid_points_dict, Tmax):
 
     return None
 
-def generate_pymeshlab_surfaces(points_dict):
-    """
-    优化的水密网格生成函数 (从PyMeshLab求交集.py中引入):
-    1. 对每层点进行插值使点数相同
-    2. 为单点层创建圆形轮廓
-    3. 层与层之间用直线连接
-    4. 确保生成完全密闭的三维体
-    """
-    vertices = []
-    faces = []
-    sorted_fids = sorted(points_dict.keys())
-    layer_indices = {}
-    
-    # 计算所有层中最大的点数，作为标准点数
-    max_points = max([len(points_dict[fid]) for fid in sorted_fids])
-    print(f"标准点数设定为: {max_points}")
-    
-    # 第一阶段：处理每层点并进行插值
-    for fid in sorted_fids:
-        layer_points = points_dict[fid]
-        layer_vertices = []
-        
-        # 判断是否为单点层
-        if len(layer_points) == 1 or len(set([(p["x"], p["y"], p["z"]) for p in layer_points])) == 1:
-            print(f"处理单点层 FID={fid}")
-            base_point = layer_points[0]
-            center_point = [float(base_point["x"]), float(base_point["y"]), float(base_point["z"])]
-            
-            # 添加中心点
-            vertices.append(center_point)
-            center_idx = len(vertices) - 1
-            
-            # 创建圆形轮廓
-            radius = 0.0001     # 适当的半径
-            for i in range(max_points):
-                angle = i * (2 * np.pi / max_points)
-                dx = radius * np.cos(angle)
-                dy = radius * np.sin(angle)
-                
-                new_point = [
-                    center_point[0] + dx,
-                    center_point[1] + dy, 
-                    center_point[2]
-                ]
-                vertices.append(new_point)
-                layer_vertices.append(len(vertices) - 1)
-        else:
-            # 对多点层进行插值处理
-            original_points = np.array([[float(p["x"]), float(p["y"]), float(p["z"])] 
-                                        for p in layer_points])
-            
-            if len(original_points) < max_points:
-                # 创建封闭曲线的参数化表示
-                cumulative_distances = [0]
-                for i in range(1, len(original_points)):
-                    dist = np.linalg.norm(original_points[i] - original_points[i-1])
-                    cumulative_distances.append(cumulative_distances[-1] + dist)
-                
-                # 添加闭合段距离
-                if not np.allclose(original_points[0], original_points[-1]):
-                    closing_dist = np.linalg.norm(original_points[0] - original_points[-1])
-                    cumulative_distances.append(cumulative_distances[-1] + closing_dist)
-                    closed_points = np.vstack([original_points, original_points[0:1]])
-                else:
-                    closed_points = original_points
-                
-                # 归一化距离参数
-                total_length = cumulative_distances[-1]
-                normalized_distances = [d/total_length for d in cumulative_distances]
-                
-                # 使用均匀参数生成插值点
-                new_params = np.linspace(0, 1, max_points, endpoint=False)
-                
-                for t in new_params:
-                    # 找到参数t对应的位置
-                    i = np.searchsorted(normalized_distances, t) - 1
-                    i = max(0, min(i, len(normalized_distances) - 2))
-                    
-                    # 计算插值因子
-                    segment_length = normalized_distances[i+1] - normalized_distances[i]
-                    if segment_length > 0:
-                        alpha = (t - normalized_distances[i]) / segment_length
-                    else:
-                        alpha = 0
-                    
-                    # 线性插值计算新点位置
-                    p1 = closed_points[i]
-                    p2 = closed_points[i+1]
-                    new_point = p1 * (1.0 - alpha) + p2 * alpha
-                    
-                    vertices.append(new_point.tolist())
-                    layer_vertices.append(len(vertices) - 1)
-            else:
-                # 直接使用原始点，确保点数正确
-                for i in range(max_points):
-                    idx = int(i * len(original_points) / max_points)
-                    vertices.append(original_points[idx].tolist())
-                    layer_vertices.append(len(vertices) - 1)
-        
-        # 存储该层的顶点索引
-        layer_indices[fid] = layer_vertices
-    
-    # 第二阶段：生成侧面三角形（直线连接各层）
-    for i in range(len(sorted_fids) - 1):
-        current_layer = layer_indices[sorted_fids[i]]
-        next_layer = layer_indices[sorted_fids[i + 1]]
-        
-        # 确保两层点数相同
-        assert len(current_layer) == len(next_layer), f"层 {sorted_fids[i]} 和 {sorted_fids[i+1]} 点数不一致"
-        
-        # 创建四边形面片（分解为两个三角形）
-        for j in range(len(current_layer)):
-            c1 = current_layer[j]
-            c2 = current_layer[(j + 1) % len(current_layer)]
-            n1 = next_layer[j]
-            n2 = next_layer[(j + 1) % len(next_layer)]
-            
-            # 添加两个三角形形成四边形
-            faces.append([c1, c2, n1])
-            faces.append([c2, n2, n1])
-    
-    # 第三阶段：生成底面和顶面（使用扇形三角形）
-    bottom_layer = layer_indices[sorted_fids[0]]
-    top_layer = layer_indices[sorted_fids[-1]]
-    
-    # 计算底面和顶面的中心点
-    bottom_center = np.mean([vertices[idx] for idx in bottom_layer], axis=0)
-    vertices.append(bottom_center.tolist())
-    bottom_center_idx = len(vertices) - 1
-    
-    top_center = np.mean([vertices[idx] for idx in top_layer], axis=0)
-    vertices.append(top_center.tolist())
-    top_center_idx = len(vertices) - 1
-    
-    # 生成底面三角形（注意顶点顺序要保证法向量朝外）
-    for j in range(len(bottom_layer)):
-        idx1 = bottom_layer[j]
-        idx2 = bottom_layer[(j + 1) % len(bottom_layer)]
-        faces.append([bottom_center_idx, idx2, idx1])  # 注意顺序，确保法向量朝外
-    
-    # 生成顶面三角形
-    for j in range(len(top_layer)):
-        idx1 = top_layer[j]
-        idx2 = top_layer[(j + 1) % len(top_layer)]
-        faces.append([top_center_idx, idx1, idx2])  # 注意顺序，确保法向量朝外
-    
-    print(f"生成网格: {len(vertices)}个顶点，{len(faces)}个面片")
-    return np.array(vertices, dtype=np.float64), np.array(faces)
-
-def visualize_pymeshlab_mesh(points_dict, Tmax, title="PyMeshLab优化网格"):
-    """使用PyMeshLab的方法生成并可视化水密网格"""
-    try:
-        # 使用PyMeshLab的方法生成网格
-        vertices, faces = generate_pymeshlab_surfaces(points_dict)
-        
-        # 创建trimesh对象
-        mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
-        
-        # 检查网格是否水密
-        is_watertight = mesh.is_watertight
-        print(f"生成的网格是否水密: {is_watertight}")
-        
-        # 创建图形
-        fig = plt.figure(figsize=(12, 10))
-        ax = fig.add_subplot(111, projection='3d')
-        
-        # 创建Z值除以50000的顶点副本用于可视化
-        vertices_viz = vertices.copy()
-        vertices_viz[:, 2] = vertices_viz[:, 2] / 50000
-        
-        # 绘制网格
-        # 使用Poly3DCollection绘制面片
-        for face in faces:
-            verts = vertices_viz[face]  # 使用Z值已处理的顶点
-            poly = Poly3DCollection([verts], alpha=0.7)
-            poly.set_color('cyan')
-            poly.set_edgecolor('blue')
-            ax.add_collection3d(poly)
-        
-        # 设置标签和标题
-        ax.set_xlabel('X')
-        ax.set_ylabel('Y')
-        ax.set_zlabel('时间')
-        ax.set_title(title)
-        
-        # 计算坐标轴范围 (使用处理后的Z值)
-        x_min, x_max = np.min(vertices_viz[:, 0]), np.max(vertices_viz[:, 0])
-        y_min, y_max = np.min(vertices_viz[:, 1]), np.max(vertices_viz[:, 1])
-        z_min, z_max = np.min(vertices_viz[:, 2]), np.max(vertices_viz[:, 2])
-        
-        # 设置坐标轴范围，确保等比例
-        max_range = max(x_max-x_min, y_max-y_min, z_max-z_min)
-        x_mid = (x_max + x_min) / 2
-        y_mid = (y_max + y_min) / 2
-        z_mid = (z_max + z_min) / 2
-        
-        ax.set_xlim(x_mid - max_range/2, x_mid + max_range/2)
-        ax.set_ylim(y_mid - max_range/2, y_mid + max_range/2)
-        ax.set_zlim(z_mid - max_range/2, z_mid + max_range/2)
-        
-        # 自定义刻度格式化
-        ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:.3f}"))
-        ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f"{y:.3f}"))
-        ax.zaxis.set_major_formatter(FuncFormatter(lambda z, _: f"{z*50000:.0f}"))
-        
-        plt.show()
-        
-        # 返回生成的网格对象 (原始网格，未修改Z值)
-        return mesh
-    except Exception as e:
-        print(f"PyMeshLab网格生成或可视化失败: {str(e)}")
-        return None
-
 def generate_loft_surfaces(time_slices, sorted_keys=None, reverse=False, resample_n=30):
     """构建网格
     Args:
@@ -923,8 +657,8 @@ def main():
     # PostgreSQL连接字符串
     connection_string = "dbname='prism' user='postgres' host='localhost' port='5432' password='SQL123'"
     # 数据表名称
-    table_name1 = "ordered_points_origin_101"
-    table_name2 = "ordered_points_dest_101"
+    table_name1 = "ordered_points_origin_102"
+    table_name2 = "ordered_points_dest_102"
 
     # 读取数据
     origin_data = read_ordered_points_from_postgres(connection_string, table_name1)
@@ -953,13 +687,13 @@ def main():
     print("\n可视化原始点集和合法点集的凸包...")
     visualize_dual_convex_hull(origin_data, dest_data, valid_points_dict, Tmax)
     
-    # 4. 使用PyMeshLab方法生成并可视化水密网格
-    print("\n使用PyMeshLab方法生成并可视化水密网格...")
-    pymeshlab_mesh = visualize_pymeshlab_mesh(valid_points_dict, Tmax)
+    # # 4. 使用PyMeshLab方法生成并可视化水密网格
+    # print("\n使用PyMeshLab方法生成并可视化水密网格...")
+    # pymeshlab_mesh = visualize_pymeshlab_mesh(valid_points_dict, Tmax)
 
     # 5. 可视化所有合法点集
     print("\n可视化满足约束的点集...")
-    visualize_valid_points(valid_points_dict, Tmax, title="合法点集（包含起点终点）")
+    visualize_valid_points(valid_points_dict, Tmax, trip_time_db = Tmax, title="合法点集（包含起点终点）")
 
     # 6. 显示合法点集凸包并保存
     print("\n显示合法点集凸包...")
@@ -973,20 +707,64 @@ def main():
     # 保存凸包网格
     if convex_hull_mesh is not None:
         try:
-            convex_hull_mesh.export(os.path.join(output_dir, "prism101_convex_hull.stl"))
+            convex_hull_mesh.export(os.path.join(output_dir, "prism102_convex_hull.stl"))
             print("凸包网格已保存")
+
+            # 保存为GeoJSON格式
+            try:
+                # 获取mesh的顶点和面
+                vertices = convex_hull_mesh.vertices
+                faces = convex_hull_mesh.faces
+                
+                # 创建GeoJSON特征列表
+                features = []
+                
+                # 遍历所有面，创建多边形特征
+                for face in faces:
+                    # 获取面的顶点坐标
+                    face_vertices = vertices[face]
+                    
+                    # 创建多边形坐标列表（GeoJSON格式）
+                    # 注意：GeoJSON使用[longitude, latitude]顺序
+                    polygon_coords = [[v[0], v[1], v[2]] for v in face_vertices]
+                    # 闭合多边形（首尾相连）
+                    polygon_coords.append(polygon_coords[0])
+                    
+                    # 创建GeoJSON特征
+                    feature = {
+                        "type": "Feature",
+                        "geometry": {
+                            "type": "Polygon",
+                            "coordinates": [polygon_coords]
+                        },
+                        "properties": {
+                            "mesh_type": "convex_hull"
+                        }
+                    }
+                    features.append(feature)
+                
+                # 创建GeoJSON对象
+                geojson_data = {
+                    "type": "FeatureCollection",
+                    "features": features
+                }
+                
+                # 保存GeoJSON文件
+                geojson_file = os.path.join(output_dir, "prism102_convex_hull.geojson")
+                print(f"\n保存凸包网格GeoJSON到: {geojson_file}")
+                
+                import json
+                with open(geojson_file, 'w', encoding='utf-8') as f:
+                    json.dump(geojson_data, f, ensure_ascii=False, indent=2)
+                print("凸包网格GeoJSON保存成功")
+                
+            except Exception as e:
+                print(f"保存凸包网格GeoJSON时出错: {str(e)}")
+
         except Exception as e:
             print(f"保存凸包网格时出错: {e}")
     else:
         print("无法创建凸包网格")
-        
-    # 保存PyMeshLab生成的网格
-    if pymeshlab_mesh is not None:
-        try:
-            pymeshlab_mesh.export(os.path.join(output_dir, "prism101_pymeshlab.stl"))
-            print("PyMeshLab网格已保存")
-        except Exception as e:
-            print(f"保存PyMeshLab网格时出错: {e}")
 
     # 构建并保存合法点集的网格
     if valid_points_dict:
@@ -1003,4 +781,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
